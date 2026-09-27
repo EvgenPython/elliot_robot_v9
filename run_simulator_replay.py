@@ -8,6 +8,12 @@ from waveframe.claude_gateway import ClaudeGateway
 from waveframe.config import load_settings
 from waveframe.logging import AuditLogger
 from waveframe.replay_runtime import ReplayRuntime
+from waveframe.run_identity import (
+    build_run_identity,
+    resolve_new_run_ai,
+    validate_resume_identity,
+    write_run_identity,
+)
 from waveframe.simulator_client import SimulatorClient
 from waveframe.stub_claude import StubClaudeGateway
 
@@ -47,8 +53,11 @@ def main():
     ap.add_argument(
         "--ai",
         choices=["stub", "live"],
-        default="stub",
-        help="stub = zero-cost integration test; live = real Anthropic API",
+        default=None,
+        help=(
+            "New run: omitted = stub. "
+            "Resume: omitted = persisted run AI mode."
+        ),
     )
     args = ap.parse_args()
 
@@ -61,27 +70,99 @@ def main():
     root = Path(__file__).resolve().parent
     load_dotenv(root / ".env")
     settings = load_settings(root)
-    sim = SimulatorClient(args.sim_url)
+
+    # --------------------------------------------------------
+    # Resolve/validate identity BEFORE gateway/runtime.
+    #
+    # Resume validation also happens BEFORE contacting the
+    # simulator, so an AI/config mismatch cannot execute or
+    # consume a Claude call.
+    # --------------------------------------------------------
 
     if args.resume:
-        created = sim.restore_replay(
-            args.resume
+        run_id = str(args.resume)
+        run_root = (
+            root
+            / "replay_runs"
+            / run_id
         )
+
+        (
+            ai_mode,
+            run_metadata,
+        ) = validate_resume_identity(
+            run_id=run_id,
+            run_root=run_root,
+            requested_ai=args.ai,
+            settings=settings,
+        )
+
+        sim = SimulatorClient(
+            args.sim_url
+        )
+
+        created = sim.restore_replay(
+            run_id
+        )
+
+        if str(
+            created.get("run_id")
+        ) != run_id:
+            sim.close()
+            raise RuntimeError(
+                "Simulator restored unexpected run_id: "
+                f"{created.get('run_id')} != {run_id}"
+            )
+
         resumed = True
+
     else:
+        ai_mode = resolve_new_run_ai(
+            args.ai
+        )
+
+        sim = SimulatorClient(
+            args.sim_url
+        )
+
         created = sim.create_replay(
             args.start,
             args.end,
         )
+
+        run_id = str(
+            created["run_id"]
+        )
+
+        run_root = (
+            root
+            / "replay_runs"
+            / run_id
+        )
+
+        run_metadata = build_run_identity(
+            run_id=run_id,
+            ai_mode=ai_mode,
+            settings=settings,
+        )
+
+        try:
+            write_run_identity(
+                run_root,
+                run_metadata,
+            )
+
+        except Exception:
+            sim.close()
+            raise
+
         resumed = False
 
-    run_id = created["run_id"]
-    run_root = root / "replay_runs" / run_id
     clock = ReplayClock()
     clock.set(created["sim_now"])
     logger = AuditLogger(run_root, clock=clock)
 
-    if args.ai == "live":
+    if ai_mode == "live":
         c = settings.get("claude", {})
         gateway = ClaudeGateway(
             root=run_root,
@@ -96,7 +177,7 @@ def main():
 
     runtime = ReplayRuntime(root, run_root, sim, clock, gateway)
     print(f"RUN_ID={run_id}")
-    print(f"AI_MODE={args.ai}")
+    print(f"AI_MODE={ai_mode}")
     print(f"RUN_ROOT={run_root}")
     print(f"RESUMED={resumed}")
     print(
