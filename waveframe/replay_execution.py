@@ -63,10 +63,6 @@ class ReplayExecutor:
             cfg.get("risk_fraction", 0.0025)
         )
 
-        self.minimum_rr = float(
-            cfg.get("minimum_rr", 2.0)
-        )
-
         self.magic = int(
             cfg.get("replay_magic", 90502)
         )
@@ -879,7 +875,6 @@ class ReplayExecutor:
         # - no pyramiding;
         # - no other existing symbol exposure;
         # - geometry;
-        # - RR;
         # - risk sizing.
         results.append(
             self.execute_candidate(
@@ -1186,24 +1181,23 @@ class ReplayExecutor:
             / risk_distance
         )
 
-        if rr + 1e-12 < self.minimum_rr:
-            data = {
-                "status": "RR_BELOW_CONFIGURED_MINIMUM",
+        # Claude owns the trading decision, including the
+        # entry / stop / target geometry and therefore its RR.
+        #
+        # Python records RR for audit/statistics, but does NOT
+        # veto a valid READY decision because of an independent
+        # minimum reward/risk opinion.
+        self._log(
+            "CLAUDE_RR_OBSERVED",
+            {
                 "timeframe": timeframe,
                 "action": decision.action,
                 "rr": rr,
-                "minimum_rr": self.minimum_rr,
                 "entry": executable_entry,
                 "stop": stop,
                 "target": target,
-            }
-
-            self._log(
-                "TRADE_NOT_OPENED_RR",
-                data,
-            )
-
-            return data
+            },
+        )
 
         balance = float(
             account.get("balance") or 0.0

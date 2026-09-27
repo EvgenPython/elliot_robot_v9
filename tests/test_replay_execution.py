@@ -1,4 +1,4 @@
-﻿import unittest
+import unittest
 
 from waveframe.models import (
     ClaudeDecision,
@@ -286,9 +286,11 @@ class ReplayExecutionTests(
             0,
         )
 
-    def test_rr_below_configured_minimum_is_not_executed(self):
-        ex, sim, _ = self.build()
+    def test_low_rr_is_executed_because_claude_is_decider(self):
+        ex, sim, log = self.build()
 
+        # RR = 1.5, intentionally below the old
+        # Python minimum_rr=2.0 threshold.
         d = ready(
             "READY_LONG",
             101.00,
@@ -307,12 +309,36 @@ class ReplayExecutionTests(
 
         self.assertEqual(
             result["status"],
-            "RR_BELOW_CONFIGURED_MINIMUM",
+            "ORDER_ACCEPTED",
+        )
+
+        self.assertAlmostEqual(
+            result["rr"],
+            1.5,
+            places=8,
         )
 
         self.assertEqual(
             len(sim.requests),
-            0,
+            1,
+        )
+
+        rr_events = [
+            data
+            for category, event, data
+            in log.events
+            if event == "CLAUDE_RR_OBSERVED"
+        ]
+
+        self.assertEqual(
+            len(rr_events),
+            1,
+        )
+
+        self.assertAlmostEqual(
+            rr_events[0]["rr"],
+            1.5,
+            places=8,
         )
 
 
