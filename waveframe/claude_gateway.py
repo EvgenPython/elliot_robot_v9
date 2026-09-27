@@ -88,13 +88,21 @@ class ClaudeGateway:
             api_key=os.environ.get("ANTHROPIC_API_KEY")
         )
 
+        # IMPORTANT:
+        # stable_prefix currently contains VALIDATED MARKET MEMORY.
+        # Market Memory changes after Claude decisions, so this block
+        # is not actually stable across analysis cycles.
+        #
+        # Explicit Anthropic caching therefore kept rebuilding the
+        # cache instead of reading it, which is more expensive than
+        # sending the same context as normal input.
+        #
+        # Keep the prompt CONTENT identical; only disable cache_control.
+        # Prompt caching can be reintroduced later for a genuinely
+        # immutable prefix.
         system_block = {
             "type": "text",
             "text": stable_prefix,
-            "cache_control": {
-                "type": "ephemeral",
-                "ttl": self.cache_ttl,
-            },
         }
 
         # Convert our real Pydantic model into Anthropic-compatible JSON Schema.
