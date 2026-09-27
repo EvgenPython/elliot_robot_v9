@@ -607,16 +607,51 @@ class ReplayRuntime:
             self.simulator.start()
 
         except Exception as error:
-            # Avoid a false failure if the replay reached FINISHED
-            # between status() and start().
+            # start() itself races with the already-running worker.
+            #
+            # Safe sequence:
+            #
+            #   status() -> RUNNING
+            #   worker advances to seq+1
+            #   simulator becomes WAITING_ACK for the next event
+            #   start() -> HTTP 400 because state is no longer RUNNING
+            #
+            # That is NOT a failure. The next WAITING_ACK proves the
+            # worker existed and made forward progress after our ACK.
             status_after = (
                 self.simulator.status()
             )
 
-            if (
+            current_after = str(
                 status_after.get("status")
-                == "FINISHED"
+                or ""
+            )
+
+            if current_after == "FINISHED":
+                return
+
+            if (
+                current_after
+                == "WAITING_ACK"
+                and self._status_proves_ack(
+                    status_after,
+                    seq,
+                )
             ):
+                self.logger.event(
+                    "recovery",
+                    "SIMULATOR_ADVANCED_DURING_START_RACE",
+                    {
+                        "seq": int(seq),
+                        "current_seq": int(
+                            status_after.get("seq")
+                            or 0
+                        ),
+                        "start_error":
+                            repr(error),
+                    },
+                )
+
                 return
 
             raise RuntimeError(

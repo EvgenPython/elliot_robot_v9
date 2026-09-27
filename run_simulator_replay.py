@@ -4,7 +4,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from waveframe.clock import ReplayClock
-from waveframe.claude_gateway import ClaudeGateway
+from waveframe.claude_gateway import (
+    ClaudeGateway,
+    ClaudeOutputTruncated,
+)
 from waveframe.config import load_settings
 from waveframe.logging import AuditLogger
 from waveframe.replay_runtime import ReplayRuntime
@@ -213,10 +216,47 @@ def main():
         )
 
     try:
-        report = runtime.run_until_finished()
+        try:
+            report = runtime.run_until_finished()
+
+        except ClaudeOutputTruncated as exc:
+            try:
+                current = sim.status()
+            except Exception:
+                current = {}
+
+            print("")
+            print("RUN_PAUSED_RECOVERABLE")
+            print("REASON=CLAUDE_MAX_TOKENS_RECOVERY_EXHAUSTED")
+            print(f"DETAIL={exc}")
+            print(
+                f"SIM_STATUS={current.get('status')}"
+            )
+            print(
+                f"SIM_TIME={current.get('sim_now')}"
+            )
+            print(
+                f"SIM_SEQ={current.get('seq')}"
+            )
+            print(
+                "NO_TRADE_DECISION_WAS_FABRICATED=True"
+            )
+            print(
+                "SIMULATOR_EVENT_REMAINS_RECOVERABLE=True"
+            )
+
+            raise SystemExit(2)
+
         print("FINISHED")
-        print(f"trades_closed={report.get('trades_closed', 0)}")
-        print(f"final_balance={(report.get('account') or {}).get('balance')}")
+        print(
+            f"trades_closed="
+            f"{report.get('trades_closed', 0)}"
+        )
+        print(
+            f"final_balance="
+            f"{(report.get('account') or {}).get('balance')}"
+        )
+
     finally:
         sim.close()
 

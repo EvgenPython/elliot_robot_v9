@@ -6,6 +6,8 @@ Use H4/H1/M30/M15 hierarchy. Focus only on Elliott waves, support/resistance,
 trend lines/channels, continuation/reversal formations, BOS/CHoCH/liquidity as context.
 Do not add unrelated indicators or macro commentary.
 Return compact JSON only. Keep rationale brief. Always return every schema field, using null/[] when appropriate.
+Do not repeat the same price levels or reasoning across multiple prose fields.
+Keep wave summaries, assessments, disagreements and watch rationales concise.
 Briefly record your own assessment of structure, support/resistance, channel and patterns, plus any disagreement with library evidence.
 If action is READY_LONG or READY_SHORT, entry/stop/target are mandatory.
 If action is WAIT, provide machine-readable watch_conditions whenever a concrete trigger exists.

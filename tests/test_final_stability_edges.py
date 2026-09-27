@@ -1,4 +1,4 @@
-﻿import json
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -169,6 +169,65 @@ class FinalStabilityEdgeTests(
             self.assertEqual(
                 0,
                 simulator.start_calls,
+            )
+
+    def test_worker_can_advance_between_status_and_start(self):
+        class RacingSimulator:
+            def __init__(self):
+                self.status_calls = 0
+                self.start_calls = 0
+
+            def status(self):
+                self.status_calls += 1
+
+                if self.status_calls == 1:
+                    return {
+                        "seq": 262,
+                        "status": "RUNNING",
+                        "pending_event": None,
+                    }
+
+                return {
+                    "seq": 263,
+                    "status": "WAITING_ACK",
+                    "pending_event": {
+                        "seq": 263,
+                    },
+                }
+
+            def start(self):
+                self.start_calls += 1
+
+                raise RuntimeError(
+                    "400 Bad Request: already advanced"
+                )
+
+        with tempfile.TemporaryDirectory() as td:
+            journal = ReplayRecoveryJournal(
+                td
+            )
+
+            simulator = RacingSimulator()
+
+            rt = runtime_shell(
+                journal,
+                simulator,
+            )
+
+            # This exact production race must be treated as
+            # successful forward progress, not as a crash.
+            rt._ensure_simulator_running_after_ack(
+                262
+            )
+
+            self.assertEqual(
+                simulator.start_calls,
+                1,
+            )
+
+            self.assertGreaterEqual(
+                simulator.status_calls,
+                2,
             )
 
     def test_lost_ack_response_reconciles_if_simulator_already_advanced(self):
