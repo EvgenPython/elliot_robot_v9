@@ -1,0 +1,35 @@
+{
+  "symbol": "XAUUSD",
+  "mode": "RESEARCH",
+  "timeframes": [
+    "H4",
+    "H1",
+    "M30",
+    "M15"
+  ],
+  "structure": {
+    "pivot_left": 3,
+    "pivot_right": 3,
+    "history_bars": 300,
+    "recent_ohlc_for_claude": 24
+  },
+  "claude": {
+    "model": "claude-sonnet-5",
+    "max_output_tokens": 2200,
+    "cache_ttl": "1h",
+    "daily_rebase_hour_fp": 8,
+    "repair_backoff_seconds": 2,
+    "transient_backoff_max_seconds": 60,
+    "fatal_retry_seconds": 300
+  },
+  "execution": {
+    "enabled": false,
+    "allow_real": false,
+    "risk_fraction": 0.0025,
+    "minimum_rr": 2.0
+  },
+  "logging": {
+    "heartbeat_seconds": 300,
+    "archive_every_memory_update": true
+  }
+}

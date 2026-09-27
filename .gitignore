@@ -1,0 +1,16 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+config/settings.json
+state/*
+!state/.gitkeep
+logs/*
+!logs/.gitkeep
+diagnostics/*
+!diagnostics/.gitkeep
+data/*
+!data/.gitkeep
+*.zip

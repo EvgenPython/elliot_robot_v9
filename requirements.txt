@@ -1,0 +1,11 @@
+anthropic>=0.83.0,<1
+pydantic>=2.9,<3
+python-dotenv>=1.0,<2
+pandas==2.0.2
+numpy==1.24.3
+numba==0.59.1
+scipy>=1.14,<2
+smartmoneyconcepts==0.0.27
+trendln==0.1.18
+json-repair>=0.50,<1
+MetaTrader5>=5.0.45; platform_system == "Windows"

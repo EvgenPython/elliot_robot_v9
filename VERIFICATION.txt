@@ -1,0 +1,25 @@
+WaveFrame / Elliot Robot V9.1 verification
+Date: 2026-09-27
+
+Core unit tests: 13 passed
+- causal pivot confirmation
+- prefix invariance for confirmed pivots
+- exact Claude watch trigger
+- only Claude can create LONG/SHORT intent
+- Market Memory persistence/versioning
+- cache HIT/CREATE status accounting
+- old budget/call-gate symbols absent
+- smartmoneyconcepts adapter does not invoke library pivot discovery
+- NO-CALL decisions are logged
+- partial Claude responses repair only missing fields
+- prompt explicitly treats libraries as advisory
+- secret redaction
+
+Static self_check.py:
+AI CALL/BUDGET GATE AUDIT: PASS
+
+Python compileall: PASS
+
+External dependency runtime smoke (smartmoneyconcepts/trendln/Anthropic SDK):
+NOT executed in the build container because outbound pip/network access is disabled there.
+The repository includes dependency_smoke.py and run_tests.ps1; run them after setup.ps1 on the development PC before backtest work.
