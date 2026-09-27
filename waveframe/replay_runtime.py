@@ -964,7 +964,8 @@ class ReplayRuntime:
             "EVENT_RECEIVED",
             {
                 "seq": seq,
-                "sim_time": event["sim_time"],
+                "sim_time":
+                    event["sim_time"],
                 "closed_timeframes":
                     sorted(closed),
             },
@@ -984,126 +985,624 @@ class ReplayRuntime:
             cycle_id=f"replay-{seq}",
         )
 
-        claude_called = False
-        actions = []
-        processed = []
-        trade_candidates = []
-        execution_decisions = []
+        # ====================================================
+        # Event-level durable analysis plan
+        # ====================================================
 
-        for tf in ANALYSIS_ORDER:
+        durable_analysis = (
+            self.recovery
+            .get_analysis(seq)
+        )
 
-            if tf not in closed:
-                continue
+        if durable_analysis is not None:
 
-            df = self.simulator.rates(
-                self.symbol,
-                tf,
-                count=self.history_bars,
+            durable_closed = set(
+                durable_analysis.get(
+                    "closed_timeframes"
+                )
+                or []
             )
 
-            if (
-                len(df)
-                < self.left
-                + self.right
-                + 1
+            if durable_closed != closed:
+                raise RuntimeError(
+                    "Recovery closed timeframe "
+                    "mismatch for "
+                    f"seq={seq}: "
+                    f"{sorted(durable_closed)} "
+                    f"!= {sorted(closed)}"
+                )
+
+            claude_called = bool(
+                durable_analysis.get(
+                    "claude_called"
+                )
+            )
+
+            actions = list(
+                durable_analysis.get(
+                    "actions"
+                )
+                or []
+            )
+
+            processed = [
+                dict(x)
+                for x
+                in (
+                    durable_analysis.get(
+                        "processed"
+                    )
+                    or []
+                )
+            ]
+
+            execution_decisions = []
+
+            for item in (
+                durable_analysis.get(
+                    "execution_plan"
+                )
+                or []
             ):
-                self.logger.event(
-                    "decisions",
-                    "TIMEFRAME_SKIPPED",
+                execution_decisions.append(
                     {
-                        "timeframe": tf,
-                        "reason":
-                            "INSUFFICIENT_HISTORY",
-                        "rows": len(df),
-                    },
+                        "timeframe":
+                            str(
+                                item[
+                                    "timeframe"
+                                ]
+                            ),
+                        "decision":
+                            ClaudeDecision
+                            .model_validate(
+                                item[
+                                    "decision"
+                                ]
+                            ),
+                    }
                 )
 
-                continue
-
-            latest = (
-                df.iloc[-1]
-                .to_dict()
-            )
-
-            pack = build_evidence(
-                df,
-                self.symbol,
-                tf,
-                left=self.left,
-                right=self.right,
-                recent=self.recent,
-                generated_at=self.clock.now(),
-            )
-
-            watch_triggered = (
-                self._watch_triggered(
-                    tf,
-                    latest,
+            trade_candidates = [
+                item
+                for item
+                in execution_decisions
+                if (
+                    item["decision"].action
+                    in {
+                        "READY_LONG",
+                        "READY_SHORT",
+                    }
                 )
+            ]
+
+            analysis_recovery_mode = (
+                "REUSED_COMPLETE"
             )
 
-            force_rebase = (
-                self._force_rebase(tf)
-            )
-
-            fingerprint = (
-                material_fingerprint(pack)
-            )
-
-            (
-                result,
-                recovered_decision,
-            ) = self._process_pack_with_recovery(
-                seq=seq,
-                sim_time=event["sim_time"],
-                timeframe=tf,
-                pack=pack,
-                fingerprint=fingerprint,
-                watch_triggered=
-                    watch_triggered,
-                force_rebase=
-                    force_rebase,
-            )
-
-            processed.append(
+            self.logger.event(
+                "recovery",
+                "ANALYSIS_PLAN_REUSED",
                 {
-                    "timeframe": tf,
-                    "called": bool(
-                        result.get("called")
-                    ),
-                    "reason":
-                        result.get("reason"),
-                    "evidence_fingerprint":
-                        fingerprint,
-                    "watch_triggered":
-                        watch_triggered,
-                    "force_rebase":
-                        force_rebase,
-                    "recovered_decision":
-                        recovered_decision,
-                }
+                    "seq": int(seq),
+                    "processed_count":
+                        len(processed),
+                    "execution_decision_count":
+                        len(
+                            execution_decisions
+                        ),
+                },
             )
 
-            if result.get("called"):
-                claude_called = True
+        else:
+
+            claude_called = False
+            actions = []
+            processed = []
+            trade_candidates = []
+            execution_decisions = []
+
+            reused_timeframes = 0
+
+            # ================================================
+            # Per-timeframe transaction
+            # ================================================
+
+            for tf in ANALYSIS_ORDER:
+
+                if tf not in closed:
+                    continue
+
+                durable_result = (
+                    self.recovery
+                    .get_timeframe_result(
+                        seq,
+                        tf,
+                    )
+                )
+
+                # --------------------------------------------
+                # Already completed timeframe.
+                #
+                # Do NOT recompute watch conditions,
+                # Market Memory policy, evidence or Claude.
+                # --------------------------------------------
+
+                if durable_result is not None:
+
+                    status = str(
+                        durable_result.get(
+                            "status"
+                        )
+                        or ""
+                    )
+
+                    if status == "SKIPPED":
+
+                        if durable_result.get(
+                            "called"
+                        ):
+                            raise RuntimeError(
+                                "SKIPPED durable "
+                                "timeframe cannot have "
+                                "called=True: "
+                                f"seq={seq} tf={tf}"
+                            )
+
+                        item = {
+                            "timeframe": tf,
+                            "called": False,
+                            "reason":
+                                durable_result.get(
+                                    "reason"
+                                ),
+                            "evidence_fingerprint":
+                                None,
+                            "watch_triggered":
+                                bool(
+                                    durable_result
+                                    .get(
+                                        "watch_triggered"
+                                    )
+                                ),
+                            "force_rebase":
+                                bool(
+                                    durable_result
+                                    .get(
+                                        "force_rebase"
+                                    )
+                                ),
+                            "rows":
+                                durable_result.get(
+                                    "rows"
+                                ),
+                            "recovered_decision":
+                                False,
+                            "recovered_timeframe_result":
+                                True,
+                        }
+
+                        processed.append(
+                            item
+                        )
+
+                        reused_timeframes += 1
+
+                        self.logger.event(
+                            "recovery",
+                            "TIMEFRAME_RESULT_REUSED",
+                            {
+                                "seq": int(seq),
+                                "timeframe": tf,
+                                "status":
+                                    "SKIPPED",
+                            },
+                        )
+
+                        continue
+
+                    if status != "PROCESSED":
+                        raise RuntimeError(
+                            "Unsupported durable "
+                            "timeframe status: "
+                            f"seq={seq} "
+                            f"tf={tf} "
+                            f"status={status}"
+                        )
+
+                    called = bool(
+                        durable_result.get(
+                            "called"
+                        )
+                    )
+
+                    decision = None
+
+                    durable_decision = (
+                        self.recovery
+                        .get_decision(
+                            seq,
+                            tf,
+                        )
+                    )
+
+                    if called:
+
+                        if durable_decision is None:
+                            raise RuntimeError(
+                                "Durable timeframe "
+                                "result says called=True "
+                                "but decision is missing: "
+                                f"seq={seq} tf={tf}"
+                            )
+
+                        result_fp = (
+                            durable_result.get(
+                                "evidence_fingerprint"
+                            )
+                        )
+
+                        decision_fp = (
+                            durable_decision.get(
+                                "evidence_fingerprint"
+                            )
+                        )
+
+                        if str(
+                            result_fp
+                        ) != str(
+                            decision_fp
+                        ):
+                            raise RuntimeError(
+                                "Durable timeframe "
+                                "fingerprint conflicts "
+                                "with durable decision: "
+                                f"seq={seq} tf={tf}"
+                            )
+
+                        if not durable_decision.get(
+                            "memory_committed"
+                        ):
+                            raise RuntimeError(
+                                "Durable timeframe "
+                                "result exists before "
+                                "memory commit: "
+                                f"seq={seq} tf={tf}"
+                            )
+
+                        decision = (
+                            ClaudeDecision
+                            .model_validate(
+                                durable_decision[
+                                    "decision"
+                                ]
+                            )
+                        )
+
+                        result = (
+                            self.orchestrator
+                            .result_from_decision(
+                                decision,
+                                reason=(
+                                    "RECOVERY_DURABLE_"
+                                    "TIMEFRAME_RESULT"
+                                ),
+                                recovered=True,
+                            )
+                        )
+
+                    else:
+
+                        if durable_decision is not None:
+                            raise RuntimeError(
+                                "Durable timeframe says "
+                                "called=False but a "
+                                "durable decision exists: "
+                                f"seq={seq} tf={tf}"
+                            )
+
+                        result = {
+                            "called": False,
+                            "reason":
+                                durable_result.get(
+                                    "reason"
+                                ),
+                            "decision": None,
+                            "trade_intent": None,
+                            "recovered": True,
+                        }
+
+                    item = {
+                        "timeframe": tf,
+                        "called":
+                            called,
+                        "reason":
+                            durable_result.get(
+                                "reason"
+                            ),
+                        "evidence_fingerprint":
+                            durable_result.get(
+                                "evidence_fingerprint"
+                            ),
+                        "watch_triggered":
+                            bool(
+                                durable_result.get(
+                                    "watch_triggered"
+                                )
+                            ),
+                        "force_rebase":
+                            bool(
+                                durable_result.get(
+                                    "force_rebase"
+                                )
+                            ),
+                        "rows":
+                            durable_result.get(
+                                "rows"
+                            ),
+                        "recovered_decision":
+                            bool(called),
+                        "recovered_timeframe_result":
+                            True,
+                    }
+
+                    processed.append(
+                        item
+                    )
+
+                    reused_timeframes += 1
+
+                    self.logger.event(
+                        "recovery",
+                        "TIMEFRAME_RESULT_REUSED",
+                        {
+                            "seq": int(seq),
+                            "timeframe": tf,
+                            "status":
+                                "PROCESSED",
+                            "called":
+                                called,
+                        },
+                    )
+
+                    if called:
+
+                        claude_called = True
+
+                        actions.append(
+                            f"{tf}:"
+                            f"{decision.action}"
+                        )
+
+                        execution_decisions.append(
+                            {
+                                "timeframe": tf,
+                                "decision":
+                                    decision,
+                            }
+                        )
+
+                        if result.get(
+                            "trade_intent"
+                        ):
+                            trade_candidates.append(
+                                {
+                                    "timeframe":
+                                        tf,
+                                    "decision":
+                                        decision,
+                                }
+                            )
+
+                    continue
+
+                # --------------------------------------------
+                # Fresh timeframe
+                # --------------------------------------------
+
+                df = self.simulator.rates(
+                    self.symbol,
+                    tf,
+                    count=self.history_bars,
+                )
+
+                rows = len(df)
+
+                if (
+                    rows
+                    < self.left
+                    + self.right
+                    + 1
+                ):
+                    self.recovery.record_timeframe_result(
+                        seq=seq,
+                        sim_time=
+                            event["sim_time"],
+                        timeframe=tf,
+                        status="SKIPPED",
+                        called=False,
+                        reason=
+                            "INSUFFICIENT_HISTORY",
+                        evidence_fingerprint=
+                            None,
+                        watch_triggered=False,
+                        force_rebase=False,
+                        rows=rows,
+                        recovered_decision=
+                            False,
+                    )
+
+                    self.logger.event(
+                        "decisions",
+                        "TIMEFRAME_SKIPPED",
+                        {
+                            "timeframe": tf,
+                            "reason":
+                                "INSUFFICIENT_HISTORY",
+                            "rows": rows,
+                        },
+                    )
+
+                    processed.append(
+                        {
+                            "timeframe": tf,
+                            "called": False,
+                            "reason":
+                                "INSUFFICIENT_HISTORY",
+                            "evidence_fingerprint":
+                                None,
+                            "watch_triggered":
+                                False,
+                            "force_rebase":
+                                False,
+                            "rows":
+                                rows,
+                            "recovered_decision":
+                                False,
+                            "recovered_timeframe_result":
+                                False,
+                        }
+                    )
+
+                    continue
+
+                latest = (
+                    df.iloc[-1]
+                    .to_dict()
+                )
+
+                pack = build_evidence(
+                    df,
+                    self.symbol,
+                    tf,
+                    left=self.left,
+                    right=self.right,
+                    recent=self.recent,
+                    generated_at=
+                        self.clock.now(),
+                )
+
+                watch_triggered = (
+                    self._watch_triggered(
+                        tf,
+                        latest,
+                    )
+                )
+
+                force_rebase = (
+                    self._force_rebase(tf)
+                )
+
+                fingerprint = (
+                    material_fingerprint(
+                        pack
+                    )
+                )
+
+                (
+                    result,
+                    recovered_decision,
+                ) = (
+                    self
+                    ._process_pack_with_recovery(
+                        seq=seq,
+                        sim_time=
+                            event["sim_time"],
+                        timeframe=tf,
+                        pack=pack,
+                        fingerprint=
+                            fingerprint,
+                        watch_triggered=
+                            watch_triggered,
+                        force_rebase=
+                            force_rebase,
+                    )
+                )
 
                 decision = result.get(
                     "decision"
                 )
 
-                if decision is not None:
-                    actions.append(
-                        f"{tf}:{decision.action}"
+                if (
+                    result.get("called")
+                    and decision is None
+                ):
+                    raise RuntimeError(
+                        "Orchestrator returned "
+                        "called=True without "
+                        "a decision: "
+                        f"seq={seq} tf={tf}"
                     )
 
-                    # Execution layer must receive EVERY fresh Claude
-                    # decision, not only READY trade intents.
-                    # WAIT is required to invalidate stale pending orders
-                    # belonging to this same timeframe.
+                # Critical ordering:
+                # persist the timeframe outcome BEFORE
+                # moving to the next timeframe.
+                self.recovery.record_timeframe_result(
+                    seq=seq,
+                    sim_time=
+                        event["sim_time"],
+                    timeframe=tf,
+                    status="PROCESSED",
+                    called=bool(
+                        result.get(
+                            "called"
+                        )
+                    ),
+                    reason=
+                        result.get("reason"),
+                    evidence_fingerprint=
+                        fingerprint,
+                    watch_triggered=
+                        watch_triggered,
+                    force_rebase=
+                        force_rebase,
+                    rows=rows,
+                    recovered_decision=
+                        recovered_decision,
+                )
+
+                processed.append(
+                    {
+                        "timeframe": tf,
+                        "called": bool(
+                            result.get(
+                                "called"
+                            )
+                        ),
+                        "reason":
+                            result.get(
+                                "reason"
+                            ),
+                        "evidence_fingerprint":
+                            fingerprint,
+                        "watch_triggered":
+                            watch_triggered,
+                        "force_rebase":
+                            force_rebase,
+                        "rows":
+                            rows,
+                        "recovered_decision":
+                            recovered_decision,
+                        "recovered_timeframe_result":
+                            False,
+                    }
+                )
+
+                if result.get("called"):
+
+                    claude_called = True
+
+                    actions.append(
+                        f"{tf}:"
+                        f"{decision.action}"
+                    )
+
+                    # Execution receives EVERY
+                    # Claude decision, including WAIT.
                     execution_decisions.append(
                         {
                             "timeframe": tf,
-                            "decision": decision,
+                            "decision":
+                                decision,
                         }
                     )
 
@@ -1113,9 +1612,39 @@ class ReplayRuntime:
                         trade_candidates.append(
                             {
                                 "timeframe": tf,
-                                "decision": decision,
+                                "decision":
+                                    decision,
                             }
                         )
+
+            # ================================================
+            # Atomic boundary:
+            # analysis is now immutable BEFORE execution.
+            # ================================================
+
+            self.recovery.mark_analysis_complete(
+                seq,
+                closed_timeframes=
+                    sorted(closed),
+                claude_called=
+                    claude_called,
+                actions=
+                    actions,
+                processed=
+                    processed,
+                execution_plan=
+                    execution_decisions,
+            )
+
+            analysis_recovery_mode = (
+                "PARTIAL_RESUME"
+                if reused_timeframes
+                else "FRESH"
+            )
+
+        # ====================================================
+        # Execution uses the exact durable execution plan.
+        # ====================================================
 
         (
             execution_results,
@@ -1152,7 +1681,8 @@ class ReplayRuntime:
             "EVENT_COMPLETED",
             {
                 "seq": seq,
-                "sim_time": event["sim_time"],
+                "sim_time":
+                    event["sim_time"],
                 "closed_timeframes":
                     sorted(closed),
                 "analyzed_timeframes": [
@@ -1168,15 +1698,19 @@ class ReplayRuntime:
                 "trade_candidates": [
                     ReplayExecutor
                     ._candidate_summary(x)
-                    for x in trade_candidates
+                    for x
+                    in trade_candidates
                 ],
                 "execution_decisions": [
                     ReplayExecutor
                     ._candidate_summary(x)
-                    for x in execution_decisions
+                    for x
+                    in execution_decisions
                 ],
                 "execution_results":
                     execution_results,
+                "analysis_recovery_mode":
+                    analysis_recovery_mode,
                 "execution_recovery_mode":
                     execution_recovery_mode,
                 "ack_recovery_mode":
@@ -1200,6 +1734,8 @@ class ReplayRuntime:
                 processed,
             "execution_results":
                 execution_results,
+            "analysis_recovery_mode":
+                analysis_recovery_mode,
             "execution_recovery_mode":
                 execution_recovery_mode,
             "ack_recovery_mode":
