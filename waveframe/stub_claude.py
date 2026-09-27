@@ -7,8 +7,15 @@ class StubClaudeGateway:
 
     def __init__(self, logger=None):
         self.logger = logger
+        self.api_called = False
 
-    def ask_until_valid(self, stable_prefix: str, delta: dict, **_kwargs) -> ClaudeDecision:
+    def ask_until_valid(
+        self,
+        stable_prefix: str,
+        delta: dict,
+        on_valid_decision=None,
+        **_kwargs,
+    ) -> ClaudeDecision:
         count = ElliottCount(
             degree=str(delta.get("timeframe") or "unknown"),
             direction="neutral",
@@ -23,7 +30,7 @@ class StubClaudeGateway:
                 "last_closed_bar": delta.get("last_closed_bar"),
                 "api_called": False,
             })
-        return ClaudeDecision(
+        decision = ClaudeDecision(
             action="WAIT",
             primary_count=count,
             alternate_count=None,
@@ -40,3 +47,10 @@ class StubClaudeGateway:
             rationale_brief="Integration smoke test only.",
             evidence_interpretation="No real Claude call was made.",
         )
+
+        if on_valid_decision is not None:
+            on_valid_decision(
+                decision
+            )
+
+        return decision

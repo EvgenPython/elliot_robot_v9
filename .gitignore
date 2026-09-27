@@ -16,3 +16,4 @@ data/*
 *.zip
 
 replay_runs/
+*.bak_before_*

@@ -1,25 +1,72 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import json, zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
-SECRET_KEYS = {"api_key", "password", "token", "secret", "login"}
+SECRET_EXACT_KEYS = {
+    "api_key",
+    "apikey",
+    "anthropic_api_key",
+    "password",
+    "passwd",
+    "token",
+    "secret",
+    "login",
+    "authorization",
+}
 
 
 def _wall_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _is_secret_key(key: Any) -> bool:
+    k = str(key).strip().lower()
+
+    if k in SECRET_EXACT_KEYS:
+        return True
+
+    if "api_key" in k or "apikey" in k:
+        return True
+
+    # access_token / refresh_token / bearer_token / auth_token etc.
+    # Deliberately do NOT match plural telemetry keys such as input_tokens.
+    if k.endswith("_token") and not k.endswith("_tokens"):
+        return True
+
+    if k.endswith("_password") or k.endswith("_secret"):
+        return True
+
+    return False
+
+
 def redact(value: Any):
     if isinstance(value, dict):
         return {
-            k: ("[REDACTED]" if any(s in str(k).lower() for s in SECRET_KEYS) else redact(v))
+            k: (
+                "[REDACTED]"
+                if _is_secret_key(k)
+                else redact(v)
+            )
             for k, v in value.items()
         }
+
     if isinstance(value, list):
         return [redact(x) for x in value]
+
+    # Last-resort protection if an Anthropic key accidentally appears
+    # under an unexpected field name.
+    if isinstance(value, str):
+        stripped = value.strip()
+
+        if stripped.startswith("sk-ant-"):
+            return "[REDACTED]"
+
+        if stripped.lower().startswith("bearer "):
+            return "[REDACTED]"
+
     return value
 
 
