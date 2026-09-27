@@ -14,3 +14,5 @@ diagnostics/*
 data/*
 !data/.gitkeep
 *.zip
+
+replay_runs/

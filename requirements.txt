@@ -9,3 +9,5 @@ smartmoneyconcepts==0.0.27
 trendln==0.1.18
 json-repair>=0.50,<1
 MetaTrader5>=5.0.45; platform_system == "Windows"
+
+httpx>=0.27,<1

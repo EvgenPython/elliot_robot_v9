@@ -16,7 +16,7 @@ def _validate_df(df: pd.DataFrame):
     if not df["close_time"].is_monotonic_increasing: raise ValueError("bars must be chronological")
 
 
-def build_evidence(df: pd.DataFrame, symbol: str, timeframe: str, left=3, right=3, recent=24) -> EvidencePack:
+def build_evidence(df: pd.DataFrame, symbol: str, timeframe: str, left=3, right=3, recent=24, generated_at: datetime|None=None) -> EvidencePack:
     _validate_df(df)
     structure=summarize_structure(df,timeframe,left,right)
     smc=analyze_smc(df,structure)
@@ -27,4 +27,5 @@ def build_evidence(df: pd.DataFrame, symbol: str, timeframe: str, left=3, right=
     rows=compact.to_dict("records")
     bars_hash=stable_hash(rows)
     last=pd.to_datetime(df.iloc[-1]["close_time"],utc=True).to_pydatetime()
-    return EvidencePack(symbol=symbol,timeframe=timeframe,generated_at=datetime.now(timezone.utc),last_closed_bar=last,bars_hash=bars_hash,structure=structure,smc=smc,trend=trend,geometry=geometry,recent_ohlc=rows)
+    generated_at=generated_at or datetime.now(timezone.utc)
+    return EvidencePack(symbol=symbol,timeframe=timeframe,generated_at=generated_at,last_closed_bar=last,bars_hash=bars_hash,structure=structure,smc=smc,trend=trend,geometry=geometry,recent_ohlc=rows)

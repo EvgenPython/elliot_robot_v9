@@ -76,3 +76,16 @@ notepad .\.env
 ## Сейчас
 
 Сервер и live execution пока не запускаем. Следующий этап — причинный backtest/replay, который должен доказать отсутствие look-ahead и корректность Market Memory/delta/caching логики до DEMO.
+
+## V9.2 — подключение к историческому симулятору
+
+Добавлены `ReplayClock`, `SimulatorClient` и `ReplayRuntime`. В replay Market Memory и audit-логи используют историческое время симулятора. Новая свеча сама по себе больше не является причиной платного вызова Claude: вызов допускается только при материальном изменении evidence, watch-trigger или rebase.
+
+Бесплатный smoke-test (Anthropic API не вызывается):
+
+```powershell
+.\.venv\Scripts\python.exe .\run_simulator_replay.py `
+  --start "2026-09-25T08:00:00+00:00" `
+  --end   "2026-09-25T10:00:00+00:00" `
+  --ai stub
+```
