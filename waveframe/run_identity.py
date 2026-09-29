@@ -3,15 +3,99 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 from pathlib import Path
 
 
-RUN_METADATA_SCHEMA_VERSION = 1
+RUN_METADATA_SCHEMA_VERSION = 2
 
 
 class RunIdentityError(RuntimeError):
     """Replay cannot be resumed with a different run identity."""
     pass
+
+
+def resolve_clean_code_revision(
+    root,
+    *,
+    runner=None,
+) -> str:
+    """
+    Return the exact Git HEAD SHA for the running robot.
+
+    Paid/live replay identity is valid only from a clean working tree.
+    This prevents one historical run from silently mixing two code
+    versions.
+
+    No secrets or environment values are inspected or persisted.
+    """
+
+    root = Path(root).resolve()
+
+    if runner is None:
+
+        def runner(args):
+            return subprocess.run(
+                args,
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+    head_result = runner(
+        [
+            "git",
+            "rev-parse",
+            "--verify",
+            "HEAD",
+        ]
+    )
+
+    if (
+        head_result.returncode != 0
+        or not str(
+            head_result.stdout
+        ).strip()
+    ):
+        raise RunIdentityError(
+            "Cannot determine Git HEAD for replay identity"
+        )
+
+    revision = str(
+        head_result.stdout
+    ).strip()
+
+    if len(revision) != 40:
+        raise RunIdentityError(
+            "Git HEAD is not a full 40-character revision"
+        )
+
+    dirty_result = runner(
+        [
+            "git",
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ]
+    )
+
+    if dirty_result.returncode != 0:
+        raise RunIdentityError(
+            "Cannot verify Git working tree cleanliness"
+        )
+
+    dirty = str(
+        dirty_result.stdout
+    ).strip()
+
+    if dirty:
+        raise RunIdentityError(
+            "Replay requires a clean Git working tree. "
+            "Commit or discard code changes before starting/resuming."
+        )
+
+    return revision
 
 
 def resolve_new_run_ai(
@@ -208,6 +292,7 @@ def build_run_identity(
     run_id: str,
     ai_mode: str,
     settings: dict,
+    code_revision: str,
 ) -> dict:
 
     if ai_mode not in {
@@ -252,6 +337,11 @@ def build_run_identity(
             ][
                 "risk_fraction"
             ],
+
+        "code_revision":
+            str(
+                code_revision
+            ),
 
         "config_fingerprint":
             _fingerprint(
@@ -392,6 +482,7 @@ def load_run_identity(
         "model",
         "symbol",
         "risk_fraction",
+        "code_revision",
         "config_fingerprint",
         "identity_config",
     }
@@ -474,6 +565,7 @@ def validate_resume_identity(
     run_root,
     requested_ai: str | None,
     settings: dict,
+    code_revision: str,
 ) -> tuple[str, dict]:
     """
     Validate BEFORE simulator restore / gateway creation / runtime.
@@ -509,12 +601,14 @@ def validate_resume_identity(
         run_id=run_id,
         ai_mode=persisted_ai,
         settings=settings,
+        code_revision=code_revision,
     )
 
     for field in (
         "model",
         "symbol",
         "risk_fraction",
+        "code_revision",
         "config_fingerprint",
     ):
         if (

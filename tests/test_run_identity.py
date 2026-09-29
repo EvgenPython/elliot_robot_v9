@@ -8,10 +8,15 @@ from waveframe.run_identity import (
     RunIdentityError,
     build_run_identity,
     load_run_identity,
+    resolve_clean_code_revision,
     resolve_new_run_ai,
     validate_resume_identity,
     write_run_identity,
 )
+
+
+TEST_REVISION_A = "a" * 40
+TEST_REVISION_B = "b" * 40
 
 
 def base_settings():
@@ -73,6 +78,7 @@ class RunIdentityTests(
                 run_id="run-1",
                 ai_mode="live",
                 settings=base_settings(),
+                code_revision=TEST_REVISION_A,
             )
 
             path = write_run_identity(
@@ -116,12 +122,14 @@ class RunIdentityTests(
                 run_id="run-2",
                 ai_mode="live",
                 settings=base_settings(),
+                code_revision=TEST_REVISION_A,
             )
 
             stub = build_run_identity(
                 run_id="run-2",
                 ai_mode="stub",
                 settings=base_settings(),
+                code_revision=TEST_REVISION_A,
             )
 
             write_run_identity(
@@ -152,6 +160,7 @@ class RunIdentityTests(
                 run_id="run-live",
                 ai_mode="live",
                 settings=settings,
+                code_revision=TEST_REVISION_A,
             )
 
             write_run_identity(
@@ -165,6 +174,7 @@ class RunIdentityTests(
                     run_root=root,
                     requested_ai=None,
                     settings=settings,
+                    code_revision=TEST_REVISION_A,
                 )
             )
 
@@ -195,6 +205,7 @@ class RunIdentityTests(
                     run_id="run-ai",
                     ai_mode="live",
                     settings=settings,
+                    code_revision=TEST_REVISION_A,
                 ),
             )
 
@@ -207,6 +218,7 @@ class RunIdentityTests(
                     run_root=root,
                     requested_ai="stub",
                     settings=settings,
+                    code_revision=TEST_REVISION_A,
                 )
 
     def test_config_change_fails_closed(self):
@@ -226,6 +238,7 @@ class RunIdentityTests(
                     run_id="run-config",
                     ai_mode="live",
                     settings=original,
+                    code_revision=TEST_REVISION_A,
                 ),
             )
 
@@ -248,6 +261,7 @@ class RunIdentityTests(
                     run_root=root,
                     requested_ai=None,
                     settings=changed,
+                    code_revision=TEST_REVISION_A,
                 )
 
     def test_missing_metadata_fails_closed(self):
@@ -270,6 +284,7 @@ class RunIdentityTests(
                     run_root=root,
                     requested_ai=None,
                     settings=base_settings(),
+                    code_revision=TEST_REVISION_A,
                 )
 
     def test_nonidentity_logging_change_is_allowed(self):
@@ -289,6 +304,7 @@ class RunIdentityTests(
                     run_id="run-logging",
                     ai_mode="live",
                     settings=original,
+                    code_revision=TEST_REVISION_A,
                 ),
             )
 
@@ -308,6 +324,7 @@ class RunIdentityTests(
                     run_root=root,
                     requested_ai=None,
                     settings=changed,
+                    code_revision=TEST_REVISION_A,
                 )
             )
 
@@ -341,6 +358,7 @@ class RunIdentityTests(
             run_id="secret-test",
             ai_mode="live",
             settings=settings,
+            code_revision=TEST_REVISION_A,
         )
 
         raw = json.dumps(
@@ -357,6 +375,140 @@ class RunIdentityTests(
             "password-value",
             raw,
         )
+
+
+
+    def test_code_revision_change_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = (
+                Path(tmp)
+                / "run-code"
+            )
+
+            settings = (
+                base_settings()
+            )
+
+            write_run_identity(
+                root,
+                build_run_identity(
+                    run_id="run-code",
+                    ai_mode="live",
+                    settings=settings,
+                    code_revision=TEST_REVISION_A,
+                ),
+            )
+
+            with self.assertRaisesRegex(
+                RunIdentityError,
+                "code_revision",
+            ):
+                validate_resume_identity(
+                    run_id="run-code",
+                    run_root=root,
+                    requested_ai=None,
+                    settings=settings,
+                    code_revision=TEST_REVISION_B,
+                )
+
+
+    def test_code_revision_is_persisted(self):
+        metadata = build_run_identity(
+            run_id="code-persist",
+            ai_mode="stub",
+            settings=base_settings(),
+            code_revision=TEST_REVISION_A,
+        )
+
+        self.assertEqual(
+            metadata[
+                "code_revision"
+            ],
+            TEST_REVISION_A,
+        )
+
+
+    def test_clean_git_revision_is_returned(self):
+
+        class Result:
+            def __init__(
+                self,
+                code,
+                stdout,
+            ):
+                self.returncode = code
+                self.stdout = stdout
+                self.stderr = ""
+
+        calls = []
+
+        def runner(args):
+            calls.append(
+                list(args)
+            )
+
+            if args[1] == "rev-parse":
+                return Result(
+                    0,
+                    TEST_REVISION_A + "\n",
+                )
+
+            return Result(
+                0,
+                "",
+            )
+
+        revision = (
+            resolve_clean_code_revision(
+                ".",
+                runner=runner,
+            )
+        )
+
+        self.assertEqual(
+            revision,
+            TEST_REVISION_A,
+        )
+
+        self.assertEqual(
+            len(calls),
+            2,
+        )
+
+
+    def test_dirty_git_tree_is_rejected(self):
+
+        class Result:
+            def __init__(
+                self,
+                code,
+                stdout,
+            ):
+                self.returncode = code
+                self.stdout = stdout
+                self.stderr = ""
+
+        def runner(args):
+
+            if args[1] == "rev-parse":
+                return Result(
+                    0,
+                    TEST_REVISION_A + "\n",
+                )
+
+            return Result(
+                0,
+                " M waveframe/prompts.py\n",
+            )
+
+        with self.assertRaisesRegex(
+            RunIdentityError,
+            "clean Git working tree",
+        ):
+            resolve_clean_code_revision(
+                ".",
+                runner=runner,
+            )
 
 
 if __name__ == "__main__":

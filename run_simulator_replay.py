@@ -12,6 +12,7 @@ from waveframe.logging import AuditLogger
 from waveframe.replay_runtime import ReplayRuntime
 from waveframe.run_identity import (
     build_run_identity,
+    resolve_clean_code_revision,
     resolve_new_run_ai,
     validate_resume_identity,
     write_run_identity,
@@ -76,6 +77,15 @@ def main():
     load_dotenv(root / ".env")
     settings = load_settings(root)
 
+    # The replay is bound to the exact clean Git revision
+    # loaded at startup. This check happens before simulator
+    # restore/create and before any Claude gateway exists.
+    code_revision = (
+        resolve_clean_code_revision(
+            root
+        )
+    )
+
     # --------------------------------------------------------
     # Resolve/validate identity BEFORE gateway/runtime.
     #
@@ -100,6 +110,7 @@ def main():
             run_root=run_root,
             requested_ai=args.ai,
             settings=settings,
+            code_revision=code_revision,
         )
 
         sim = SimulatorClient(
@@ -149,6 +160,7 @@ def main():
             run_id=run_id,
             ai_mode=ai_mode,
             settings=settings,
+            code_revision=code_revision,
         )
 
         try:
@@ -185,6 +197,9 @@ def main():
     print(f"AI_MODE={ai_mode}")
     print(f"RUN_ROOT={run_root}")
     print(f"RESUMED={resumed}")
+    print(
+        f"CODE_REVISION={code_revision}"
+    )
     print(
         f"SIM_STATUS={created.get('status')}"
     )
