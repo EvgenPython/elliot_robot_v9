@@ -6,8 +6,6 @@ from dotenv import load_dotenv
 from waveframe.clock import ReplayClock
 from waveframe.claude_gateway import (
     ClaudeGateway,
-    ClaudeCycleError,
-    ClaudeOutputTruncated,
 )
 from waveframe.config import load_settings
 from waveframe.logging import AuditLogger
@@ -20,6 +18,9 @@ from waveframe.run_identity import (
 )
 from waveframe.simulator_client import SimulatorClient
 from waveframe.stub_claude import StubClaudeGateway
+from waveframe.runtime_supervisor import (
+    run_runtime_supervised,
+)
 
 
 def main():
@@ -217,67 +218,15 @@ def main():
         )
 
     try:
-        try:
-            report = runtime.run_until_finished()
-
-        except ClaudeOutputTruncated as exc:
-            try:
-                current = sim.status()
-            except Exception:
-                current = {}
-
-            print("")
-            print("RUN_PAUSED_RECOVERABLE")
-            print("REASON=CLAUDE_MAX_TOKENS_RECOVERY_EXHAUSTED")
-            print(f"DETAIL={exc}")
-            print(
-                f"SIM_STATUS={current.get('status')}"
-            )
-            print(
-                f"SIM_TIME={current.get('sim_now')}"
-            )
-            print(
-                f"SIM_SEQ={current.get('seq')}"
-            )
-            print(
-                "NO_TRADE_DECISION_WAS_FABRICATED=True"
-            )
-            print(
-                "SIMULATOR_EVENT_REMAINS_RECOVERABLE=True"
-            )
-
-            raise SystemExit(2)
-
-        except ClaudeCycleError as exc:
-            try:
-                current = sim.status()
-            except Exception:
-                current = {}
-
-            print("")
-            print("RUN_PAUSED_RECOVERABLE")
-            print("REASON=CLAUDE_CYCLE_REQUIRES_OPERATOR")
-            print(
-                f"ERROR_TYPE={type(exc).__name__}"
-            )
-            print(f"DETAIL={exc}")
-            print(
-                f"SIM_STATUS={current.get('status')}"
-            )
-            print(
-                f"SIM_TIME={current.get('sim_now')}"
-            )
-            print(
-                f"SIM_SEQ={current.get('seq')}"
-            )
-            print(
-                "NO_TRADE_DECISION_WAS_FABRICATED=True"
-            )
-            print(
-                "SIMULATOR_EVENT_REMAINS_RECOVERABLE=True"
-            )
-
-            raise SystemExit(2)
+        report = run_runtime_supervised(
+            runtime,
+            sim,
+            run_root,
+            on_resume=lambda: load_dotenv(
+                root / ".env",
+                override=True,
+            ),
+        )
 
         print("FINISHED")
         print(
