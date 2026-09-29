@@ -31,6 +31,16 @@ class ClaudeSchemaExhausted(ClaudeCycleError):
     pass
 
 
+class ClaudeFatalAPIError(ClaudeCycleError):
+    """Configuration/auth/billing error that must not be blindly retried."""
+    pass
+
+
+class ClaudeTransportAmbiguous(ClaudeCycleError):
+    """Transport failed after request delivery could be ambiguous."""
+    pass
+
+
 class ClaudeOutputTruncated(ClaudeCycleError):
     """Claude exhausted bounded output recovery."""
     pass
@@ -48,7 +58,9 @@ class ClaudeGateway:
     - Structured Outputs constrain transport JSON to ClaudeDecision schema.
     - Python validates schema and Elliott hard rules but never invents a trade.
     - No daily call cap, budget cap, slot quota or cost authorization gate exists.
-    - Technical retry loops are finite so one broken cycle cannot spend forever.
+    - Billable/ambiguous retry loops are finite.
+    - Pre-connect outages and explicit temporary API-service errors wait safely
+      without advancing simulator time or fabricating a trading decision.
     """
 
     def __init__(
@@ -133,8 +145,18 @@ class ClaudeGateway:
             else effort
         )
 
+        # Retry ownership belongs to this gateway.
+        #
+        # Anthropic SDK retries are disabled so we never have:
+        #
+        #     gateway retry
+        #         -> SDK retry
+        #             -> hidden extra request
+        #
+        # This makes request count, recovery and billing audit deterministic.
         client = Anthropic(
-            api_key=os.environ.get("ANTHROPIC_API_KEY")
+            api_key=os.environ.get("ANTHROPIC_API_KEY"),
+            max_retries=0,
         )
 
         # IMPORTANT:
@@ -231,6 +253,144 @@ class ClaudeGateway:
 
         return any(marker in message for marker in fatal_markers)
 
+    @staticmethod
+    def _exception_chain(exc: Exception):
+        """
+        Walk __cause__/__context__ without looping.
+
+        Anthropic APIConnectionError normally wraps httpx/httpcore
+        transport exceptions, so the outer exception alone is not
+        enough to decide whether the request was ever sent.
+        """
+        current = exc
+        seen = set()
+
+        while current is not None:
+            ident = id(current)
+
+            if ident in seen:
+                break
+
+            seen.add(ident)
+            yield current
+
+            current = (
+                current.__cause__
+                or current.__context__
+            )
+
+    @classmethod
+    def _safe_external_retry(
+        cls,
+        exc: Exception,
+    ) -> bool:
+        """
+        True only when automatic retry is operationally safe.
+
+        SAFE:
+        - DNS lookup failure
+        - TCP/TLS connect failure/timeout
+        - explicit HTTP 408/409/429
+        - explicit HTTP 5xx
+
+        NOT automatically safe:
+        - read timeout
+        - connection reset after a request may have been sent
+        - malformed/unknown transport failures
+
+        Ambiguous failures pause instead of risking duplicated paid work.
+        """
+        status = getattr(
+            exc,
+            "status_code",
+            None,
+        )
+
+        try:
+            status_int = (
+                int(status)
+                if status is not None
+                else None
+            )
+        except Exception:
+            status_int = None
+
+        if (
+            status_int in {
+                408,
+                409,
+                429,
+            }
+            or (
+                status_int is not None
+                and 500 <= status_int <= 599
+            )
+        ):
+            return True
+
+        safe_names = {
+            "connecterror",
+            "connecttimeout",
+            "gaierror",
+        }
+
+        safe_markers = (
+            "getaddrinfo failed",
+            "name or service not known",
+            "temporary failure in name resolution",
+            "nodename nor servname provided",
+            "connection refused",
+            "failed to establish a new connection",
+        )
+
+        for item in cls._exception_chain(
+            exc
+        ):
+            name = (
+                type(item).__name__
+                .strip()
+                .lower()
+            )
+
+            message = (
+                str(item)
+                .strip()
+                .lower()
+            )
+
+            if name in safe_names:
+                return True
+
+            if any(
+                marker in message
+                for marker in safe_markers
+            ):
+                return True
+
+        return False
+
+    @staticmethod
+    def _external_wait_seconds(
+        consecutive_failures: int,
+    ) -> float:
+        """
+        2, 4, 8, 16, 32, then max 60 seconds.
+        """
+        return float(
+            min(
+                60,
+                2 ** min(
+                    max(
+                        int(
+                            consecutive_failures
+                        ),
+                        1,
+                    ),
+                    6,
+                ),
+            )
+        )
+
     def _log_paid_response(
         self,
         cycle_id: str,
@@ -309,21 +469,20 @@ class ClaudeGateway:
 
         attempt = 0
         transport_failures = 0
+        external_waits = 0
         schema_repairs = 0
         elliott_revisions = 0
         truncation_retries = 0
         truncation_recovery = False
 
-        # Absolute cycle bound in addition to category-specific bounds.
-        max_total_attempts = (
-            1
-            + self.max_transport_failures
-            + self.max_schema_repairs
-            + self.max_elliott_revisions
-            + self.max_truncation_retries
-        )
-
-        while attempt < max_total_attempts:
+        # Category-specific limits bound every path that can spend money
+        # or produce an ambiguous duplicate.
+        #
+        # The only intentionally unbounded path is a PROVABLY SAFE
+        # external wait such as DNS/TCP connect failure or explicit
+        # temporary HTTP service status. Those failures have no usable
+        # Claude response and simulator time must remain frozen.
+        while True:
             attempt += 1
 
             dynamic = update_prompt(
@@ -434,32 +593,90 @@ class ClaudeGateway:
                             "retry": False,
                         },
                     )
-                    raise
 
-                transport_failures += 1
+                    raise ClaudeFatalAPIError(
+                        "Claude API reported a fatal "
+                        "authentication/billing/request error"
+                    ) from exc
 
-                if transport_failures > self.max_transport_failures:
+                # DNS/TCP connect failures occur before a usable API
+                # response exists. Explicit 408/409/429/5xx responses
+                # are also temporary service states.
+                #
+                # These are allowed to wait indefinitely because:
+                #   - simulator time remains frozen,
+                #   - ACK is not sent,
+                #   - no fake WAIT/LONG/SHORT is created,
+                #   - durable TF decisions already completed in this
+                #     event remain reusable.
+                if self._safe_external_retry(
+                    exc
+                ):
+                    external_waits += 1
+
+                    delay = (
+                        self
+                        ._external_wait_seconds(
+                            external_waits
+                        )
+                    )
+
                     self.logger.event(
                         "errors",
-                        "CLAUDE_TRANSPORT_RETRIES_EXHAUSTED",
+                        "CLAUDE_EXTERNAL_UNAVAILABLE_WAIT",
                         {
-                            "cycle_id": cycle_id,
-                            "attempt": attempt,
-                            "transport_failures": transport_failures,
+                            "cycle_id":
+                                cycle_id,
+                            "attempt":
+                                attempt,
+                            "type":
+                                name,
+                            "error":
+                                message,
+                            "external_waits":
+                                external_waits,
+                            "delay_seconds":
+                                delay,
+                            "retry":
+                                True,
+                            "safe_retry":
+                                True,
                         },
                     )
 
-                    raise ClaudeCycleError(
-                        "Claude transport retry limit exhausted for one analysis cycle"
-                    ) from exc
+                    sleep(delay)
+                    continue
 
-                delay = min(
-                    60,
-                    2 ** min(transport_failures, 6),
+                # Anything else may be ambiguous: the request could
+                # conceivably have reached the API before the local
+                # transport failed. Never blindly duplicate potentially
+                # billable work.
+                transport_failures += 1
+
+                self.logger.event(
+                    "errors",
+                    "CLAUDE_AMBIGUOUS_TRANSPORT_PAUSE",
+                    {
+                        "cycle_id":
+                            cycle_id,
+                        "attempt":
+                            attempt,
+                        "type":
+                            name,
+                        "error":
+                            message,
+                        "transport_failures":
+                            transport_failures,
+                        "retry":
+                            False,
+                    },
                 )
 
-                sleep(delay)
-                continue
+                raise ClaudeTransportAmbiguous(
+                    "Claude transport result is ambiguous; "
+                    "automatic retry disabled to prevent "
+                    "possible duplicate paid work"
+                ) from exc
 
             # From this point onward the API response exists and may be billable.
             # Always log cost BEFORE attempting local JSON/Pydantic validation.
@@ -763,6 +980,7 @@ class ClaudeGateway:
                     "cycle_id": cycle_id,
                     "attempts": attempt,
                     "transport_failures": transport_failures,
+                    "external_waits": external_waits,
                     "schema_repairs": schema_repairs,
                     "elliott_revisions": elliott_revisions,
                     "truncation_retries":
@@ -774,20 +992,3 @@ class ClaudeGateway:
             )
 
             return decision
-
-        self.logger.event(
-            "errors",
-            "CLAUDE_CYCLE_ATTEMPTS_EXHAUSTED",
-            {
-                "cycle_id": cycle_id,
-                "attempts": attempt,
-                "max_total_attempts": max_total_attempts,
-                "transport_failures": transport_failures,
-                "schema_repairs": schema_repairs,
-                "elliott_revisions": elliott_revisions,
-            },
-        )
-
-        raise ClaudeCycleError(
-            "Claude analysis cycle exhausted its technical attempt bound"
-        )

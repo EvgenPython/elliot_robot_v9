@@ -69,23 +69,147 @@ class RetryBoundTests(unittest.TestCase):
 
         self.assertEqual(calls["n"], 2)
 
-    def test_transient_transport_failure_is_bounded(self):
+    def test_ambiguous_transport_is_never_blindly_retried(self):
         calls = {"n": 0}
 
         def transport(_stable, _dynamic):
             calls["n"] += 1
-            raise RuntimeError("temporary network failure")
 
-        gateway = self.make_gateway(transport)
+            # Unknown transport failure:
+            # request delivery cannot be proven either way.
+            raise RuntimeError(
+                "ambiguous transport failure"
+            )
 
-        with self.assertRaises(ClaudeCycleError):
+        gateway = self.make_gateway(
+            transport
+        )
+
+        with self.assertRaises(
+            ClaudeCycleError
+        ):
             gateway.ask_until_valid(
                 "stable-prefix",
                 {},
                 sleep=lambda _seconds: None,
             )
 
-        self.assertEqual(calls["n"], 4)
+        # Cost-safety invariant:
+        # never blindly duplicate ambiguous work.
+        self.assertEqual(
+            calls["n"],
+            1,
+        )
+
+    def test_dns_failure_waits_then_recovers_same_cycle(self):
+        calls = {"n": 0}
+        sleeps = []
+
+        def transport(_stable, _dynamic):
+            calls["n"] += 1
+
+            if calls["n"] <= 2:
+                # Exact production failure marker seen on Windows.
+                raise RuntimeError(
+                    "[Errno 11001] getaddrinfo failed"
+                )
+
+            return {
+                "text": json.dumps(
+                    self._valid_wait_payload()
+                ),
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 500,
+                },
+                "model":
+                    "claude-sonnet-5",
+                "stop_reason":
+                    "end_turn",
+            }
+
+        gateway = self.make_gateway(
+            transport
+        )
+
+        decision = gateway.ask_until_valid(
+            "stable-prefix",
+            {"x": 1},
+            sleep=lambda seconds:
+                sleeps.append(seconds),
+        )
+
+        self.assertEqual(
+            decision.action,
+            "WAIT",
+        )
+
+        self.assertEqual(
+            calls["n"],
+            3,
+        )
+
+        self.assertEqual(
+            sleeps,
+            [2.0, 4.0],
+        )
+
+    def test_http_503_waits_then_recovers_same_cycle(self):
+        calls = {"n": 0}
+        sleeps = []
+
+        class ServiceUnavailable(
+            RuntimeError
+        ):
+            status_code = 503
+
+        def transport(_stable, _dynamic):
+            calls["n"] += 1
+
+            if calls["n"] == 1:
+                raise ServiceUnavailable(
+                    "service unavailable"
+                )
+
+            return {
+                "text": json.dumps(
+                    self._valid_wait_payload()
+                ),
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 500,
+                },
+                "model":
+                    "claude-sonnet-5",
+                "stop_reason":
+                    "end_turn",
+            }
+
+        gateway = self.make_gateway(
+            transport
+        )
+
+        decision = gateway.ask_until_valid(
+            "stable-prefix",
+            {"x": 1},
+            sleep=lambda seconds:
+                sleeps.append(seconds),
+        )
+
+        self.assertEqual(
+            decision.action,
+            "WAIT",
+        )
+
+        self.assertEqual(
+            calls["n"],
+            2,
+        )
+
+        self.assertEqual(
+            sleeps,
+            [2.0],
+        )
 
 
 

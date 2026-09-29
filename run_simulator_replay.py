@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from waveframe.clock import ReplayClock
 from waveframe.claude_gateway import (
     ClaudeGateway,
+    ClaudeCycleError,
     ClaudeOutputTruncated,
 )
 from waveframe.config import load_settings
@@ -228,6 +229,37 @@ def main():
             print("")
             print("RUN_PAUSED_RECOVERABLE")
             print("REASON=CLAUDE_MAX_TOKENS_RECOVERY_EXHAUSTED")
+            print(f"DETAIL={exc}")
+            print(
+                f"SIM_STATUS={current.get('status')}"
+            )
+            print(
+                f"SIM_TIME={current.get('sim_now')}"
+            )
+            print(
+                f"SIM_SEQ={current.get('seq')}"
+            )
+            print(
+                "NO_TRADE_DECISION_WAS_FABRICATED=True"
+            )
+            print(
+                "SIMULATOR_EVENT_REMAINS_RECOVERABLE=True"
+            )
+
+            raise SystemExit(2)
+
+        except ClaudeCycleError as exc:
+            try:
+                current = sim.status()
+            except Exception:
+                current = {}
+
+            print("")
+            print("RUN_PAUSED_RECOVERABLE")
+            print("REASON=CLAUDE_CYCLE_REQUIRES_OPERATOR")
+            print(
+                f"ERROR_TYPE={type(exc).__name__}"
+            )
             print(f"DETAIL={exc}")
             print(
                 f"SIM_STATUS={current.get('status')}"
