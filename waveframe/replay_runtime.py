@@ -398,6 +398,147 @@ class ReplayRuntime:
 
         return result, False
 
+    def _apply_ready_confirmation_gate(
+        self,
+        execution_decisions: list[dict],
+        processed: list[dict],
+    ) -> list[dict]:
+        """
+        V9.3 execution-only confirmation gate.
+
+        Claude remains the analytical/trading decision engine:
+
+        - the original validated READY decision is already committed
+          to Market Memory and the durable Claude decision journal;
+        - Python does NOT alter Elliott counts, direction, confidence,
+          entry, stop, target or Claude's future context.
+
+        Only execution timing changes:
+
+        EVIDENCE_CHANGED + READY_*
+            -> do not enter immediately;
+            -> execution plan receives WAIT, which also invalidates
+               a stale same-timeframe pending order.
+
+        WATCH_TRIGGERED + READY_*
+            -> execute normally.
+
+        FORCE_REBASE + READY_*
+            -> execute normally.
+
+        The transformed plan is sealed by mark_analysis_complete()
+        BEFORE execution, therefore crash/resume cannot resurrect a
+        suppressed READY order.
+        """
+        reason_by_timeframe = {
+            str(item.get("timeframe")):
+                str(item.get("reason") or "")
+            for item in processed
+        }
+
+        transformed = []
+
+        for item in execution_decisions:
+            timeframe = str(
+                item["timeframe"]
+            )
+
+            decision = item["decision"]
+
+            reason = reason_by_timeframe.get(
+                timeframe,
+                "",
+            )
+
+            should_suppress = (
+                decision.action
+                in {
+                    "READY_LONG",
+                    "READY_SHORT",
+                }
+                and reason
+                == "EVIDENCE_CHANGED"
+            )
+
+            if not should_suppress:
+                transformed.append(
+                    item
+                )
+                continue
+
+            original_action = (
+                decision.action
+            )
+
+            payload = (
+                decision.model_dump(
+                    mode="json"
+                )
+            )
+
+            # Important:
+            # this is an EXECUTION-ONLY synthetic WAIT.
+            # The original READY remains unchanged in
+            # Claude Market Memory and recovery decisions.
+            payload["action"] = "WAIT"
+            payload["entry"] = None
+            payload["stop"] = None
+            payload["target"] = None
+
+            execution_wait = (
+                ClaudeDecision.model_validate(
+                    payload
+                )
+            )
+
+            transformed.append(
+                {
+                    "timeframe":
+                        timeframe,
+                    "decision":
+                        execution_wait,
+                }
+            )
+
+            self.logger.event(
+                "trade_funnel",
+                (
+                    "READY_SUPPRESSED_"
+                    "AWAITING_CONFIRMATION"
+                ),
+                {
+                    "timeframe":
+                        timeframe,
+                    "reason":
+                        reason,
+                    "original_action":
+                        original_action,
+                    "execution_action":
+                        "WAIT",
+                    "entry":
+                        decision.entry,
+                    "stop":
+                        decision.stop,
+                    "target":
+                        decision.target,
+                    "confidence":
+                        decision.confidence,
+                    "watch_count":
+                        len(
+                            decision
+                            .watch_conditions
+                            or []
+                        ),
+                    "policy":
+                        (
+                            "WATCH_TRIGGERED_OR_"
+                            "FORCE_REBASE_REQUIRED"
+                        ),
+                },
+            )
+
+        return transformed
+
     def _execute_with_recovery(
         self,
         *,
@@ -1651,6 +1792,22 @@ class ReplayRuntime:
                                     decision,
                             }
                         )
+
+            # ================================================
+            # V9.3 execution confirmation gate.
+            #
+            # This happens AFTER Claude/Market Memory processing
+            # but BEFORE the execution plan becomes durable.
+            # Therefore the analytical state keeps Claude's exact
+            # READY decision while execution can require confirmation.
+            # ================================================
+
+            execution_decisions = (
+                self._apply_ready_confirmation_gate(
+                    execution_decisions,
+                    processed,
+                )
+            )
 
             # ================================================
             # Atomic boundary:

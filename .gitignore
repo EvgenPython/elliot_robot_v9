@@ -17,3 +17,6 @@ data/*
 
 replay_runs/
 *.bak_before_*
+
+# Local zero-cost counterfactual research runs
+whatif_runs/
